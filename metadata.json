@@ -1,0 +1,8 @@
+{
+  "name": "ZeroTrustHub",
+  "description": "An enterprise-grade Zero Trust access and threat intelligence platform featuring real-time risk scoring, ML anomaly detection, and tamper-proof audit logging.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
