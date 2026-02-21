@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from flask import Flask, request, session, jsonify
 from functools import wraps
 from getmac import get_mac_address
+import time
 
 # ===============================
 # 1. IMMUTABLE LEDGER (BLOCKCHAIN)
@@ -66,8 +67,12 @@ class ImmutableAuditLedger:
 
     def add_block(self, event_type, payload):
         with self.lock:
+            # Verify integrity before adding new records
             valid, msg = self.verify_chain()
-            if not valid: raise PermissionError(f"Ledger Corrupted: {msg}")
+            if not valid: 
+                print(f"[CRITICAL] Ledger Corrupted: {msg}")
+                return False
+            
             chain = self.load_chain()
             prev = chain[-1]
             ts = datetime.utcnow().isoformat()
@@ -79,6 +84,7 @@ class ImmutableAuditLedger:
             }
             chain.append(new_block)
             self._atomic_save(chain)
+            return True
 
 # ===============================
 # 2. CORE CONFIGURATION
@@ -87,9 +93,12 @@ app = Flask(__name__)
 app.secret_key = "highly_secure_and_random_key"
 
 ledger = ImmutableAuditLedger()
+
 db_config = {
-    "host": "localhost", "user": "root", 
-    "password": "yourpassword", "database": "network_monitor"
+    "host": "localhost",
+    "user": "root", 
+    "password": "youpassword", 
+    "database": "network_monitor"
 }
 
 INFRA_DEVICES = {
@@ -105,31 +114,51 @@ active_admin_sessions = {}
 # ===============================
 # 3. HELPERS & SECURITY
 # ===============================
-def get_db_connection(): return mysql.connector.connect(**db_config)
+def get_db_connection():
+    return mysql.connector.connect(**db_config)
 
 def log_event(user, ip, status, event_type, msg, fingerprint=None):
-    # Log to MySQL (Relational search)
-    conn = get_db_connection(); cursor = conn.cursor()
-    cursor.execute("INSERT INTO access_logs (username, ip_address, login_time, status, fingerprint) VALUES (%s, %s, %s, %s, %s)",
-                   (user, ip, datetime.now(), status, fingerprint))
-    conn.commit(); cursor.close(); conn.close()
-    # Log to Blockchain (Immutable audit)
-    ledger.add_block(event_type, {"user": user, "ip": ip, "msg": msg})
+    """Logs to both MySQL and the Blockchain Ledger."""
+    try:
+        # 1. MySQL Logging
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO access_logs (username, ip_address, login_time, status, fingerprint) 
+            VALUES (%s, %s, %s, %s, %s)
+        """, (user, ip, datetime.now(), status, fingerprint))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"[ERROR] MySQL Log Failed: {e}")
+
+    try:
+        # 2. Blockchain Logging
+        ledger.add_block(event_type, {"user": user, "ip": ip, "msg": msg})
+    except Exception as e:
+        print(f"[ERROR] Blockchain Log Failed: {e}")
 
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if "admin_user" not in session: return jsonify({"error": "Unauthorized"}), 401
+        if "admin_user" not in session:
+            return jsonify({"error": "Unauthorized"}), 401
         return f(*args, **kwargs)
     return decorated
 
-def get_fingerprint(): return hashlib.sha256(f"{request.remote_addr}{request.headers.get('User-Agent')}".encode()).hexdigest()
+def get_fingerprint():
+    """Generates a hardware/browser-specific fingerprint."""
+    raw = f"{request.remote_addr}{request.headers.get('User-Agent')}"
+    return hashlib.sha256(raw.encode()).hexdigest()
 
 def tcp_ping(host, port):
     try:
         s = socket.create_connection((host, port), timeout=2)
-        s.close(); return True
-    except: return False
+        s.close()
+        return True
+    except:
+        return False
 
 # ===============================
 # 4. MONITORING ENGINE
@@ -140,17 +169,18 @@ def monitor_engine():
             is_up = tcp_ping(cfg["ip"], cfg["port"])
             current_mac = get_mac_address(ip=cfg["ip"]) or "UNKNOWN"
 
-            # Check for Spoofing
-            if is_up and current_mac.upper() != cfg["mac"].upper():
-                msg = f"MAC Mismatch: Expected {cfg['mac']}, got {current_mac}"
-                threat_alerts.append({"type": "MAC_SPOOFING", "device": name, "msg": msg, "time": datetime.now().isoformat()})
-                ledger.add_block("MAC_SPOOFING", {"device": name, "ip": cfg["ip"], "mac": current_mac})
+            # 1. Threat Detection: MAC Spoofing
+            if is_up and current_mac != "UNKNOWN":
+                if current_mac.upper() != cfg["mac"].upper():
+                    msg = f"SPOOFING ALERT: {name} IP {cfg['ip']} has unauthorized MAC {current_mac}"
+                    threat_alerts.append({"type": "MAC_SPOOFING", "device": name, "msg": msg, "time": datetime.now().isoformat()})
+                    ledger.add_block("THREAT_DETECTED", {"type": "MAC_SPOOFING", "details": msg})
 
-            # Check for Connectivity Loss
+            # 2. Threat Detection: Connectivity Loss
             if not is_up and cfg["priority"] in ["high", "critical"]:
-                msg = f"Critical device {name} is OFFLINE"
+                msg = f"CRITICAL OFFLINE: {name} ({cfg['ip']}) is down."
                 threat_alerts.append({"type": "CONN_LOSS", "device": name, "msg": msg, "time": datetime.now().isoformat()})
-                ledger.add_block("DEVICE_STATUS_CHANGE", {"device": name, "status": "OFFLINE"})
+                ledger.add_block("DEVICE_ALERT", {"type": "CONN_LOSS", "details": msg})
 
             device_health[name] = {"status": is_up, "mac": current_mac, "ts": datetime.now().isoformat()}
         time.sleep(20)
@@ -158,60 +188,113 @@ def monitor_engine():
 threading.Thread(target=monitor_engine, daemon=True).start()
 
 # ===============================
-# 5. API ROUTES
+# 5. AUTHENTICATION ROUTES
 # ===============================
+
 @app.route("/login", methods=["POST"])
 def login():
-    data = request.json
-    username, password = data.get("username"), data.get("password")
+    data = request.get_json(silent=True)
+    print(f"\n--- AUTH ATTEMPT ---")
+    
+    if not data:
+        return jsonify({"error": "No JSON received"}), 400
+
+    username = data.get("username")
+    password = data.get("password")
     ip = request.remote_addr
 
-    conn = get_db_connection(); cursor = conn.cursor()
-    cursor.execute("SELECT password_hash FROM admins WHERE username = %s", (username,))
-    row = cursor.fetchone()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT password_hash FROM admins WHERE username = %s", (username,))
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
 
-    if row and bcrypt.checkpw(password.encode(), row[0].encode()):
-        fp = get_fingerprint()
-        session["admin_user"], session["fingerprint"], session["login_time"] = username, fp, datetime.now().isoformat()
-        active_admin_sessions[ip] = {"user": username, "login": session["login_time"]}
-        log_event(username, ip, "SUCCESS", "LOGIN", "Admin logged in", fp)
-        return jsonify({"message": "Access Granted"})
-    
-    log_event(username, ip, "FAILED", "FAILED_LOGIN", "Invalid credentials attempted")
-    return jsonify({"error": "Access Denied"}), 401
+        if not row:
+            print(f"FAILED: User '{username}' not found.")
+            return jsonify({"error": "Access Denied"}), 401
+
+        stored_hash = row[0]
+        # Handle MySQL string/byte return types
+        if isinstance(stored_hash, str):
+            stored_hash = stored_hash.encode('utf-8')
+
+        # Bcrypt Check
+        if bcrypt.checkpw(password.encode('utf-8'), stored_hash):
+            print(f"SUCCESS: {username} authenticated.")
+            
+            fp = get_fingerprint()
+            session["admin_user"] = username
+            session["fingerprint"] = fp
+            session["login_time"] = datetime.now().isoformat()
+            
+            active_admin_sessions[ip] = {"user": username, "login": session["login_time"]}
+            
+            log_event(username, ip, "SUCCESS", "LOGIN", "Successful admin login", fp)
+            return jsonify({"message": "Access Granted"})
+        else:
+            print("FAILED: Password mismatch.")
+            log_event(username, ip, "FAILED", "AUTH_FAILURE", "Invalid password")
+            return jsonify({"error": "Access Denied"}), 401
+            
+    except Exception as e:
+        print(f"CRITICAL ERROR: {e}")
+        return jsonify({"error": "Server connection error"}), 500
 
 @app.route("/logout", methods=["POST"])
 @login_required
 def logout():
     ip = request.remote_addr
     username = session.get("admin_user")
-    start_time = datetime.fromisoformat(session.get("login_time"))
-    duration = int((datetime.now() - start_time).total_seconds())
-
-    conn = get_db_connection(); cursor = conn.cursor()
-    cursor.execute("UPDATE access_logs SET logout_time=%s, duration_seconds=%s WHERE username=%s AND logout_time IS NULL",
-                   (datetime.now(), duration, username))
-    conn.commit()
+    start_time_str = session.get("login_time")
     
-    log_event(username, ip, "LOGOUT", "LOGOUT", f"Session duration: {duration}s")
-    active_admin_sessions.pop(ip, None); session.clear()
-    return jsonify({"message": "Logged out"})
+    if start_time_str:
+        start_time = datetime.fromisoformat(start_time_str)
+        duration = int((datetime.now() - start_time).total_seconds())
+        
+        # Update MySQL Log with duration
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE access_logs SET logout_time=%s, duration_seconds=%s 
+                WHERE username=%s AND logout_time IS NULL ORDER BY login_time DESC LIMIT 1
+            """, (datetime.now(), duration, username))
+            conn.commit()
+            cursor.close()
+            conn.close()
+        except Exception as e:
+            print(f"Logout SQL update error: {e}")
+
+        log_event(username, ip, "LOGOUT", "LOGOUT", f"Session ended. Duration: {duration}s")
+
+    active_admin_sessions.pop(ip, None)
+    session.clear()
+    return jsonify({"message": "Logged out successfully"})
+
+# ===============================
+# 6. MONITORING DATA API
+# ===============================
 
 @app.route("/api/monitor", methods=["GET"])
 @login_required
 def api_monitor():
-    # Session Security Check
+    # Session Hijack Protection: Check Fingerprint
     if session.get("fingerprint") != get_fingerprint():
-        log_event(session.get("admin_user"), request.remote_addr, "THREAT", "SESSION_HIJACK", "Fingerprint mismatch detected")
-        session.clear(); return jsonify({"error": "Security violation"}), 403
+        log_event(session.get("admin_user"), request.remote_addr, "THREAT", "SESSION_HIJACK", "Fingerprint changed mid-session!")
+        session.clear()
+        return jsonify({"error": "Security violation detected"}), 403
 
     valid, ledger_msg = ledger.verify_chain()
+    
     return jsonify({
         "infrastructure": device_health,
-        "threats": threat_alerts[-10:],
-        "ledger_integrity": {"status": valid, "message": ledger_msg},
+        "threats": threat_alerts[-15:], # Last 15 threats
+        "ledger_integrity": {"status": "SECURE" if valid else "CORRUPTED", "details": ledger_msg},
         "active_sessions": active_admin_sessions
     })
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # RUN ON PORT 5001 PER USER REQUEST
+    app.run(host="0.0.0.0", port=5001, debug=True)

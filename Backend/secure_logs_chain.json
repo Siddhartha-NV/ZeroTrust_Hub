@@ -1,0 +1,40 @@
+[
+    {
+        "index": 0,
+        "timestamp": "2026-02-21T03:53:19.609071",
+        "data": {
+            "event": "GENESIS",
+            "msg": "Audit chain initialized"
+        },
+        "previous_hash": "0",
+        "hash": "8492a70853039c2fd93594dc9aa4026ad953204d043ef25a4f9c880450cf8b52",
+        "signature": "17e2740e9111039123fb750a1d23e5dd647cea2d7169e72bac4db65973b75b99"
+    },
+    {
+        "index": 1,
+        "timestamp": "2026-02-21T03:53:23.630964",
+        "data": {
+            "event_type": "DEVICE_STATUS_CHANGE",
+            "payload": {
+                "device": "ID_Scanner",
+                "status": "OFFLINE"
+            }
+        },
+        "previous_hash": "8492a70853039c2fd93594dc9aa4026ad953204d043ef25a4f9c880450cf8b52",
+        "hash": "6c72d47a15918581b7e3ed6b29633527dc7a87b9ba6b0169c8d3b52ebf7cf36b",
+        "signature": "9088e4425358df6489799ac35fd1649736ce037da2e7e7783fecec589afe0e9e"
+    },
+    {
+        "index": 2,
+        "timestamp": "2026-02-21T03:53:23.749601",
+        "data": {
+            "event_type": "DEVICE_STATUS_CHANGE",
+            "payload": {
+                "device": "ID_Scanner",
+                "status": "OFFLINE"
+            }
+        },
+        "previous_hash": "6c72d47a15918581b7e3ed6b29633527dc7a87b9ba6b0169c8d3b52ebf7cf36b",
+        "hash": "9d825f6fc00ab989c4b52312509af5b99f41a51154ece289e6bc3ee358330d1a",
+        "signature": "9d9ba2e2e65ce36e2db5f812a64f3ce6ff4db83d3cbb18c732b29027ead81073"
+    }]
